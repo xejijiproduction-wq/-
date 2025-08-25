@@ -108,6 +108,12 @@ function hasAdminPermissions(member) {
            member.roles.cache.some(role => role.permissions.has(PermissionFlagsBits.Administrator));
 }
 
+// Проверка наличия любой роли из списка
+function hasAnyRole(member, roleIds) {
+    if (!Array.isArray(roleIds) || roleIds.length === 0) return false;
+    return roleIds.some(roleId => member.roles.cache.has(roleId));
+}
+
 // Функция для получения списка участников сервера с нужными ролями
 function getServerMembers(guild, allowedRoleIds) {
     const members = [];
@@ -241,8 +247,19 @@ const vsCommand = {
                 return true;
             }
 
-            // Получаем список участников сервера с нужными ролями
-            const members = getServerMembers(interaction.guild, serverConfig.gameResults.allowedRoleIds || []);
+            // Проверка прав на внесение данных
+            const submitterRoleIds = serverConfig.gameResults.submitterRoleIds || serverConfig.gameResults.allowedRoleIds || [];
+            if (!hasAnyRole(interaction.member, submitterRoleIds)) {
+                await interaction.reply({
+                    content: '❌ У вас нет прав вносить данные. Обратитесь к администратору.',
+                    flags: 64
+                });
+                return true;
+            }
+
+            // Получаем список участников сервера по разрешенным ролям-участникам
+            const participantRoleIds = serverConfig.gameResults.participantRoleIds || serverConfig.gameResults.allowedRoleIds || [];
+            const members = getServerMembers(interaction.guild, participantRoleIds);
             
             if (members.length === 0) {
                 await interaction.update({
@@ -294,6 +311,16 @@ const vsCommand = {
             }
 
             try {
+                // Проверка прав на внесение данных перед отправкой
+                const submitterRoleIds = serverConfig.gameResults.submitterRoleIds || serverConfig.gameResults.allowedRoleIds || [];
+                if (!hasAnyRole(interaction.member, submitterRoleIds)) {
+                    await interaction.reply({
+                        content: '❌ У вас нет прав вносить данные. Обратитесь к администратору.',
+                        flags: 64
+                    });
+                    return true;
+                }
+
                 // Отправляем отчет в указанный канал
                 const channel = await client.channels.fetch(serverConfig.gameResults.channelId);
                 if (!channel) {
@@ -356,8 +383,12 @@ const vsSetupCommand = {
                 .setDescription('Канал для отправки отчетов о результатах игр')
                 .setRequired(true))
         .addStringOption(option =>
-            option.setName('роли')
-                .setDescription('ID ролей через запятую (например: 123456789,987654321)')
+            option.setName('роли_вносить')
+                .setDescription('ID ролей, кто может вносить данные (через запятую)')
+                .setRequired(true))
+        .addStringOption(option =>
+            option.setName('роли_участники')
+                .setDescription('ID ролей для списка участников (через запятую)')
                 .setRequired(true))
         .addStringOption(option =>
             option.setName('фото_победы')
@@ -379,7 +410,8 @@ const vsSetupCommand = {
         }
 
         const channel = interaction.options.getChannel('канал');
-        const rolesText = interaction.options.getString('роли');
+        const submitterRolesText = interaction.options.getString('роли_вносить');
+        const participantRolesText = interaction.options.getString('роли_участники');
         const winPhotoUrl = interaction.options.getString('фото_победы');
         const losePhotoUrl = interaction.options.getString('фото_поражения');
 
@@ -393,44 +425,62 @@ const vsSetupCommand = {
         }
 
         // Разбираем ID ролей
-        const roleIds = rolesText.split(',').map(id => id.trim()).filter(id => /^\d+$/.test(id));
-        
-        if (roleIds.length === 0) {
+        const submitterRoleIds = submitterRolesText.split(',').map(id => id.trim()).filter(id => /^\d+$/.test(id));
+        const participantRoleIds = participantRolesText.split(',').map(id => id.trim()).filter(id => /^\d+$/.test(id));
+
+        if (submitterRoleIds.length === 0 || participantRoleIds.length === 0) {
             await interaction.reply({
-                content: '❌ Не удалось определить ID ролей. Укажите ID ролей через запятую (например: 123456789,987654321)',
+                content: '❌ Укажите корректные ID ролей для вносящих данные и для списка участников (через запятую).',
                 flags: 64
             });
             return;
         }
 
         // Проверяем, что роли существуют на сервере
-        const validRoles = [];
-        const invalidRoleIds = [];
-        
-        for (const roleId of roleIds) {
+        const validSubmitterRoles = [];
+        const invalidSubmitterRoleIds = [];
+        for (const roleId of submitterRoleIds) {
             try {
                 const role = await interaction.guild.roles.fetch(roleId);
-                if (role) {
-                    validRoles.push(role);
-                } else {
-                    invalidRoleIds.push(roleId);
-                }
-            } catch (error) {
-                invalidRoleIds.push(roleId);
+                if (role) validSubmitterRoles.push(role); else invalidSubmitterRoleIds.push(roleId);
+            } catch (_) {
+                invalidSubmitterRoleIds.push(roleId);
             }
         }
 
-        if (validRoles.length === 0) {
+        const validParticipantRoles = [];
+        const invalidParticipantRoleIds = [];
+        for (const roleId of participantRoleIds) {
+            try {
+                const role = await interaction.guild.roles.fetch(roleId);
+                if (role) validParticipantRoles.push(role); else invalidParticipantRoleIds.push(roleId);
+            } catch (_) {
+                invalidParticipantRoleIds.push(roleId);
+            }
+        }
+
+        if (validSubmitterRoles.length === 0) {
             await interaction.reply({
-                content: '❌ Не найдено ни одной валидной роли. Проверьте ID ролей.',
+                content: '❌ Не найдено ни одной валидной роли, кто может вносить данные. Проверьте ID.',
                 flags: 64
             });
             return;
         }
 
-        if (invalidRoleIds.length > 0) {
+        if (validParticipantRoles.length === 0) {
             await interaction.reply({
-                content: `⚠️ Некоторые роли не найдены: ${invalidRoleIds.join(', ')}\n\nПродолжаем с найденными ролями.`,
+                content: '❌ Не найдено ни одной валидной роли для списка участников. Проверьте ID.',
+                flags: 64
+            });
+            return;
+        }
+
+        if (invalidSubmitterRoleIds.length > 0 || invalidParticipantRoleIds.length > 0) {
+            const parts = [];
+            if (invalidSubmitterRoleIds.length > 0) parts.push(`роль вносящих данные: ${invalidSubmitterRoleIds.join(', ')}`);
+            if (invalidParticipantRoleIds.length > 0) parts.push(`роль участников: ${invalidParticipantRoleIds.join(', ')}`);
+            await interaction.reply({
+                content: `⚠️ Некоторые роли не найдены (${parts.join('; ')}).\n\nПродолжаем с найденными ролями.`,
                 flags: 64
             });
         }
@@ -446,7 +496,8 @@ const vsSetupCommand = {
             // Обновляем конфигурацию
             configs[guildId].gameResults = {
                 channelId: channel.id,
-                allowedRoleIds: validRoles.map(role => role.id),
+                submitterRoleIds: validSubmitterRoles.map(role => role.id),
+                participantRoleIds: validParticipantRoles.map(role => role.id),
                 winPhotoUrl: winPhotoUrl,
                 losePhotoUrl: losePhotoUrl
             };
@@ -458,7 +509,8 @@ const vsSetupCommand = {
                     .setTitle('✅ Настройка модуля отчетности завершена')
                     .addFields(
                         { name: '📺 Канал для отчетов', value: channel.toString(), inline: true },
-                        { name: '👥 Разрешенные роли', value: validRoles.map(r => r.toString()).join(', '), inline: false },
+                        { name: '✍️ Роли, кто может вносить', value: validSubmitterRoles.map(r => r.toString()).join(', '), inline: false },
+                        { name: '👥 Роли списка участников', value: validParticipantRoles.map(r => r.toString()).join(', '), inline: false },
                         { name: '🏆 Фото победы', value: winPhotoUrl, inline: true },
                         { name: '💀 Фото поражения', value: losePhotoUrl, inline: true }
                     )
